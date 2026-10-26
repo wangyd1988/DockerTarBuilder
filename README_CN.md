@@ -3,12 +3,13 @@
 ![1](https://github.com/user-attachments/assets/8bfc9d45-76fb-4cf4-be80-19fb202e8a95)
 ![2](https://github.com/user-attachments/assets/cf990b0c-a149-4f5b-9be8-d0f909f8f402)
 ![3](https://github.com/user-attachments/assets/d9560061-4092-4ea2-9b8c-a580c9fdcf2d)
-## 2、输入要构建的docker名称和标签
+## 2、运行 Docker Tar Builder 工作流，输入要构建的docker名称和标签
 > 如果不输入标签 则默认拉取latest标签,但请确保该镜像有latest <br>
-> 如图左侧选项代表要构建的平台。支持amd64、arm64、arm32位三种。<br>
-> 若构建的docker镜像小于2GB 推荐发布到release，选择红色框的部分。 绝大多数镜像都是小于2GB的<br>
-> 若构建的docker镜像大于2GB 小于5GB 推荐使用另外三个工作流<br>
-> 若要构建大于5GB的镜像。本项目不适合。<br>
+> 多个镜像用逗号/空格分隔（支持中文逗号）<br>
+> `platform` 选择要构建的平台。支持 amd64、arm64、arm32，选 all 则三种架构并行构建。<br>
+> `output` 选择 release 时，小于2GB的文件发布到 Release，大于2GB的文件自动改为 Artifact 上传<br>
+> `output` 选择 artifact 时，全部上传到 Artifact，保留天数由 `retention_days` 指定<br>
+> 注：下方截图为旧版（多个工作流）界面，仅供参考<br>
 
 ![4](https://github.com/user-attachments/assets/1a28afc2-2af2-47ff-91fa-0d42282a260a)
 ![5](https://github.com/user-attachments/assets/5fc5e388-ffb7-4242-aa0e-076136e1e974)

@@ -1,0 +1,164 @@
+name: Docker Tar Builder
+
+on:
+  workflow_dispatch:
+    inputs:
+      docker_images:
+        description: '镜像名称，多个用逗号/空格分隔（支持中文逗号）'
+        required: true
+        default: 'alpine:latest,busybox:stable-glibc'
+      platform:
+        description: '目标平台'
+        required: true
+        type: choice
+        default: amd64
+        options:
+          - amd64
+          - arm64
+          - arm32
+          - all
+      output:
+        description: '输出方式（Release 单文件需小于 2GB，超出部分会自动改为 Artifact）'
+        required: true
+        type: choice
+        default: release
+        options:
+          - release
+          - artifact
+      retention_days:
+        description: 'Artifact 保留天数（1-90）'
+        required: false
+        default: '1'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.arch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: ${{ fromJSON(inputs.platform == 'all' && '["amd64","arm64","arm32"]' || format('["{0}"]', inputs.platform)) }}
+    env:
+      ARCH: ${{ matrix.arch }}
+      IMAGES: ${{ inputs.docker_images }}
+      OUTPUT: ${{ inputs.output }}
+      OUT_DIR: ${{ github.workspace }}/out
+      BIG_DIR: ${{ github.workspace }}/out-big
+    steps:
+      - name: Resolve platform
+        shell: bash
+        run: |
+          case "$ARCH" in
+            amd64) platform=linux/amd64;  tag=DockerTarBuilder-AMD64; label=x86-64 ;;
+            arm64) platform=linux/arm64;  tag=DockerTarBuilder-ARM64; label=ARM64 ;;
+            arm32) platform=linux/arm/v7; tag=DockerTarBuilder-ARM32; label=ARM32 ;;
+            *) echo "::error::Unknown arch: $ARCH"; exit 1 ;;
+          esac
+          {
+            echo "DOCKER_PLATFORM=$platform"
+            echo "RELEASE_TAG=$tag"
+            echo "RELEASE_LABEL=$label"
+            echo "RELEASE_NAME=$(TZ=Asia/Shanghai date +'%Y-%m-%d %H:%M') Build for $label"
+          } >> "$GITHUB_ENV"
+
+      - name: Free disk space
+        shell: bash
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL || true
+          docker system prune -af >/dev/null || true
+          df -h /
+
+      - name: Pull, save and compress images
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v pigz >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq pigz; }
+          mkdir -p "$OUT_DIR"
+
+          save_args=()
+          if docker save --help 2>/dev/null | grep -q -- '--platform'; then
+            save_args=(--platform "$DOCKER_PLATFORM")
+          fi
+
+          normalized="${IMAGES//，/ }"
+          normalized="${normalized//,/ }"
+          read -r -a images <<< "$normalized"
+          if [ "${#images[@]}" -eq 0 ]; then
+            echo "::error::No images specified"; exit 1
+          fi
+
+          for image in "${images[@]}"; do
+            echo "::group::$image ($DOCKER_PLATFORM)"
+            docker pull --platform "$DOCKER_PLATFORM" "$image"
+            actual=$(docker image inspect --format '{{.Os}}/{{.Architecture}}{{if .Variant}}/{{.Variant}}{{end}}' "$image")
+            echo "Pulled platform: $actual"
+            if [[ "$actual" != "$DOCKER_PLATFORM"* ]]; then
+              echo "::warning::$image resolved to $actual, expected $DOCKER_PLATFORM"
+            fi
+
+            name=$(printf '%s' "$image" | sed 's#[/:@]#_#g')
+            file="$OUT_DIR/${name}-${ARCH}.tar.gz"
+            docker save "${save_args[@]}" "$image" | pigz -6 > "$file"
+            pigz -t "$file"
+            ls -lh "$file"
+            docker rmi "$image" >/dev/null || true
+            echo "::endgroup::"
+          done
+
+          if [ "$OUTPUT" = "release" ]; then
+            limit=$((2 * 1024 * 1024 * 1024 - 1))
+            for f in "$OUT_DIR"/*.tar.gz; do
+              if [ "$(stat -c %s "$f")" -gt "$limit" ]; then
+                mkdir -p "$BIG_DIR"
+                mv "$f" "$BIG_DIR/"
+                echo "::warning::$(basename "$f") exceeds 2GB, uploading as artifact instead"
+              fi
+            done
+          fi
+
+          {
+            echo "### $RELEASE_LABEL ($DOCKER_PLATFORM)"
+            echo '| File | Size |'
+            echo '|---|---|'
+            for f in "$OUT_DIR"/*.tar.gz "$BIG_DIR"/*.tar.gz; do
+              [ -f "$f" ] && echo "| $(basename "$f") | $(du -h "$f" | cut -f1) |"
+            done
+            echo
+            echo 'Load: `docker load -i <file>.tar.gz`'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload artifact
+        if: inputs.output == 'artifact'
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-images-${{ matrix.arch }}-${{ github.run_number }}
+          path: ${{ env.OUT_DIR }}/*.tar.gz
+          compression-level: 0
+          retention-days: ${{ inputs.retention_days }}
+
+      - name: Upload oversized files as artifact
+        if: inputs.output == 'release' && hashFiles('out-big/*.tar.gz') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-images-${{ matrix.arch }}-${{ github.run_number }}-large
+          path: ${{ env.BIG_DIR }}/*.tar.gz
+          compression-level: 0
+          retention-days: ${{ inputs.retention_days }}
+
+      - name: Publish to GitHub Release
+        if: inputs.output == 'release' && hashFiles('out/*.tar.gz') != ''
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: ${{ env.RELEASE_NAME }}
+          files: ${{ env.OUT_DIR }}/*.tar.gz
+          body: |
+            [![Github](https://img.shields.io/badge/RELEASE:DockerTarBuilder-123456?logo=github&logoColor=fff&labelColor=green&style=for-the-badge)](https://www.bilibili.com/video/BV1EZ421M7mL) [![Github](https://img.shields.io/badge/国内加速站下载-FC7C0D?logo=github&logoColor=fff&labelColor=000&style=for-the-badge)](https://wkdaily.cpolar.top/archives/1)
+            ### How to use? For example
+            `docker load -i alpine_latest-${{ matrix.arch }}.tar.gz`
+            ### Video teaching
+            [![Bilibili](https://img.shields.io/badge/Bilibili-123456?logo=bilibili&logoColor=fff&labelColor=fb7299)](https://www.bilibili.com/video/BV1yyq6YREdF)
